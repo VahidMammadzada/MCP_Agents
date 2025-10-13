@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "crypto-agent": {
+      "command": "python",
+      "args": ["crypto_agent.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "nasdaq-agent": {
+      "command": "python", 
+      "args": ["nasdaq_agent.py"],
+      "env": {
+        "PYTHONPATH": "."
+      }
+    },
+    "portfolio-advisor": {
+      "command": "python",
+      "args": ["portfolio_advisor.py"],
+      "env": {
+        "PYTHONPATH": ".",
+        "MONGODB_URI": "__",
+        "MONGODB_DB_NAME": "portfolio_advisor"
+      }
+    }
+  }
+}
