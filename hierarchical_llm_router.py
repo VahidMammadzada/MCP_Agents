@@ -45,7 +45,7 @@ class AgentResponse:
 
 class QueryRoutingDecision(BaseModel):
     """Model for routing decisions."""
-    agents_to_use: List[str] = Field(description="List of agents to use (crypto, stock, portfolio)")
+    agents_to_use: List[str] = Field(description="List of agents to use (crypto, document)")
     reasoning: str = Field(description="Explanation of routing decision")
     requires_summary: bool = Field(default=True, description="Whether to provide a summary")
     priority_order: List[str] = Field(default=[], description="Order of agent execution")
@@ -53,7 +53,7 @@ class QueryRoutingDecision(BaseModel):
 class HierarchicalLLMRouter:
     """Main hierarchical router that orchestrates multiple agents and provides summaries."""
     
-    def __init__(self, llm_model: str = "gemini-1.5-pro"):
+    def __init__(self, llm_model: str = "gemini-2.5-pro"):
         self.session_id = str(uuid.uuid4())
         self.llm_model = llm_model
         
@@ -91,59 +91,59 @@ class HierarchicalLLMRouter:
             )
         elif llm_provider == "gemini":
             return ChatGoogleGenerativeAI(
-                model=os.getenv("GEMINI_MODEL", "gemini-1.5-pro"),
+                model=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
                 temperature=0.1,
                 google_api_key=os.getenv("GOOGLE_API_KEY")
             )
         else:
             # Default to Gemini
             return ChatGoogleGenerativeAI(
-                model="gemini-1.5-pro",
+                model="gemini-2.5-pro",
                 temperature=0.1,
                 google_api_key=os.getenv("GOOGLE_API_KEY")
             )
 
     def _create_routing_prompt(self) -> ChatPromptTemplate:
         """Create the prompt template for routing decisions."""
-        system_message = """You are an intelligent financial query router that decides which specialized agents to use.
+        system_message = """You are an intelligent query router that decides which specialized agents to use.
 
 Available Agents:
 1. CRYPTO AGENT: Cryptocurrency analysis, prices, market data, blockchain insights
-2. STOCK AGENT: Stock market analysis, company research, financial metrics
-3. PORTFOLIO AGENT: Portfolio management, investment advice, risk assessment, knowledge search
+# 2. DOCUMENT AGENT: Document analysis, Q&A on uploaded files, semantic search, RAG-based answers (DISABLED)
 
 Instructions:
 1. Analyze the user's query to understand their intent
-2. Determine which agents are needed (can be multiple)
+2. Determine which agents are needed (currently only crypto agent is available)
 3. Consider if the query requires data from multiple domains
 4. Decide if a summary is needed when using multiple agents
 5. Set priority order if multiple agents are used
 
 Examples:
 
-Query: "What's the current price of Bitcoin and Apple stock?"
+Query: "What's the current price of Bitcoin?"
 Decision: {
-  "agents_to_use": ["crypto", "stock"],
-  "reasoning": "Query requires both cryptocurrency and stock data",
-  "requires_summary": true,
-  "priority_order": ["crypto", "stock"]
-}
-
-Query: "How should I diversify my portfolio between crypto and stocks?"
-Decision: {
-  "agents_to_use": ["crypto", "stock", "portfolio"],
-  "reasoning": "Need current market data from both domains plus portfolio advice",
-  "requires_summary": true,
-  "priority_order": ["crypto", "stock", "portfolio"]
-}
-
-Query: "What's Tesla's P/E ratio?"
-Decision: {
-  "agents_to_use": ["stock"],
-  "reasoning": "Simple stock information query",
+  "agents_to_use": ["crypto"],
+  "reasoning": "Simple cryptocurrency price query",
   "requires_summary": false,
-  "priority_order": ["stock"]
+  "priority_order": ["crypto"]
 }
+
+# COMMENTED OUT - Document agent disabled
+# Query: "Analyze the document about Bitcoin and tell me the current price"
+# Decision: {
+#   "agents_to_use": ["document", "crypto"],
+#   "reasoning": "Need to analyze document first, then get current market data",
+#   "requires_summary": true,
+#   "priority_order": ["document", "crypto"]
+# }
+
+# Query: "What does the uploaded report say?"
+# Decision: {
+#   "agents_to_use": ["document"],
+#   "reasoning": "Document analysis query",
+#   "requires_summary": false,
+#   "priority_order": ["document"]
+# }
 
 Respond with a JSON object following the QueryRoutingDecision schema."""
 
@@ -154,22 +154,21 @@ Respond with a JSON object following the QueryRoutingDecision schema."""
 
     def _create_summary_prompt(self) -> ChatPromptTemplate:
         """Create prompt for summarizing multiple agent responses."""
-        system_message = """You are a financial analysis summarizer. Your job is to synthesize responses from multiple specialized agents into a comprehensive, coherent summary.
+        system_message = """You are an intelligent response synthesizer. Your job is to combine insights from multiple specialized agents into a comprehensive, coherent summary.
 
 Guidelines:
 1. Combine insights from all agents into a unified response
-2. Highlight key findings and recommendations
-3. Identify correlations and connections between different data points
+2. Highlight key findings and important information
+3. Identify connections and relationships between different data points
 4. Provide actionable insights based on the combined analysis
-5. Maintain the technical accuracy from each agent
+5. Maintain technical accuracy from each agent
 6. Present information in a logical, easy-to-understand format
 
 Structure your summary as:
 1. **Key Findings** - Main insights from each agent
-2. **Market Analysis** - Current market conditions and trends
-3. **Investment Implications** - What this means for investors
-4. **Recommendations** - Specific actionable advice
-5. **Risk Considerations** - Important risks to consider
+2. **Analysis** - Current data and trends
+3. **Insights** - What this information means
+4. **Recommendations** - Actionable advice if applicable
 
 Original Query: {original_query}
 
@@ -230,20 +229,38 @@ Please provide a comprehensive summary that synthesizes all the information."""
             messages = self.routing_prompt.format_messages(query=query)
             response = await self.llm.ainvoke(messages)
             
-            # Parse JSON response
+            # Parse JSON response - handle various formats
             response_text = response.content
+            
+            # Extract JSON from markdown code blocks
             if "```json" in response_text:
                 json_start = response_text.find("```json") + 7
                 json_end = response_text.find("```", json_start)
                 json_text = response_text[json_start:json_end].strip()
+            elif "```" in response_text:
+                # Handle plain code blocks
+                json_start = response_text.find("```") + 3
+                json_end = response_text.find("```", json_start)
+                json_text = response_text[json_start:json_end].strip()
             else:
+                # Try to find JSON object directly
                 json_text = response_text.strip()
+                # If it starts with text before JSON, try to extract just the JSON
+                if not json_text.startswith("{"):
+                    start_idx = json_text.find("{")
+                    end_idx = json_text.rfind("}")
+                    if start_idx != -1 and end_idx != -1:
+                        json_text = json_text[start_idx:end_idx+1]
+            
+            # Clean up common issues
+            json_text = json_text.strip()
             
             decision_data = json.loads(json_text)
             return QueryRoutingDecision(**decision_data)
             
         except Exception as e:
             logger.error(f"Error in routing decision: {e}")
+            logger.debug(f"Response text was: {response_text if 'response_text' in locals() else 'N/A'}")
             # Fallback to simple keyword-based routing
             return self._fallback_routing(query)
 
@@ -253,23 +270,21 @@ Please provide a comprehensive summary that synthesizes all the information."""
         agents_to_use = []
         
         # Check for crypto keywords
-        crypto_keywords = ["crypto", "cryptocurrency", "bitcoin", "ethereum", "btc", "eth", "coin", "token"]
+        crypto_keywords = ["crypto", "cryptocurrency", "bitcoin", "ethereum", "btc", "eth", "coin", "token", 
+                          "blockchain", "defi", "altcoin", "dogecoin", "cardano", "solana"]
         if any(keyword in query_lower for keyword in crypto_keywords):
             agents_to_use.append("crypto")
         
-        # Check for stock keywords
-        stock_keywords = ["stock", "share", "equity", "nasdaq", "company", "ticker", "financial", "earnings"]
-        if any(keyword in query_lower for keyword in stock_keywords):
-            agents_to_use.append("stock")
+        # # Check for document keywords - COMMENTED OUT
+        # document_keywords = ["document", "file", "pdf", "upload", "analyze document", "what does the document say", 
+        #                    "summarize", "text", "paper", "report", "analyze file", "read", "collection", 
+        #                    "uploaded", "content"]
+        # if any(keyword in query_lower for keyword in document_keywords):
+        #     agents_to_use.append("document")
         
-        # Check for portfolio keywords
-        portfolio_keywords = ["portfolio", "investment", "advice", "allocation", "risk", "diversify", "recommend"]
-        if any(keyword in query_lower for keyword in portfolio_keywords):
-            agents_to_use.append("portfolio")
-        
-        # Default to portfolio if no clear match
+        # Default to crypto if no clear match
         if not agents_to_use:
-            agents_to_use = ["portfolio"]
+            agents_to_use = ["crypto"]
         
         return QueryRoutingDecision(
             agents_to_use=agents_to_use,
