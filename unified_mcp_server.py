@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Unified MCP Server - Single server hosting all financial tools
-This server combines crypto, nasdaq, and portfolio tools in one place
+Unified MCP Server - Stock, Portfolio, and Knowledge Tools
+This server provides stock market data and portfolio management tools.
+Crypto tools are handled by the external CoinGecko MCP server.
 """
 import asyncio
 import json
@@ -12,7 +13,6 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 import yfinance as yf
-import ccxt
 import httpx
 import pymongo
 from pymongo import MongoClient
@@ -43,11 +43,11 @@ class UnifiedMCPServer:
         self.server = Server("unified-financial-tools")
         
         # Initialize external connections
-        self.crypto_exchange = ccxt.binance()
+        # Note: ccxt exchange not needed since crypto is handled by CoinGecko MCP
         self.mongo_client = None
         self.db = None
         
-        # Setup MongoDB connection
+        # Setup MongoDB connection (with timeout to prevent hanging)
         self.setup_mongodb()
         
         # Setup handlers
@@ -57,15 +57,20 @@ class UnifiedMCPServer:
         """Initialize MongoDB connection."""
         try:
             mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
-            self.mongo_client = MongoClient(mongo_uri)
+            # Add timeout to prevent hanging
+            self.mongo_client = MongoClient(
+                mongo_uri,
+                serverSelectionTimeoutMS=2000  # 2 second timeout
+            )
             self.db = self.mongo_client[os.getenv("MONGODB_DB_NAME", "financial_data")]
             
-            # Test connection
+            # Test connection with timeout
             self.mongo_client.admin.command('ping')
-            logger.info("Connected to MongoDB successfully")
+            logger.info("✓ MongoDB connected successfully")
             
         except Exception as e:
-            logger.error(f"Failed to connect to MongoDB: {e}")
+            logger.warning(f"⚠ MongoDB connection failed: {e}")
+            logger.warning("⚠ Portfolio/knowledge tools will have limited functionality")
             self.mongo_client = None
             self.db = None
 
@@ -74,56 +79,9 @@ class UnifiedMCPServer:
         
         @self.server.list_tools()
         async def handle_list_tools() -> ListToolsResult:
-            """List all available financial tools."""
+            """List all available financial tools (Stock, Portfolio, Knowledge)."""
             return ListToolsResult(
                 tools=[
-                    # Cryptocurrency Tools
-                    Tool(
-                        name="get_crypto_price",
-                        description="Get current cryptocurrency price and basic market data",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "symbol": {"type": "string", "description": "Crypto symbol (e.g., BTC, ETH)"},
-                                "vs_currency": {"type": "string", "description": "Currency to compare against", "default": "USD"}
-                            },
-                            "required": ["symbol"]
-                        }
-                    ),
-                    Tool(
-                        name="get_crypto_market_data",
-                        description="Get comprehensive cryptocurrency market data",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "symbol": {"type": "string", "description": "Crypto symbol (e.g., BTC, ETH)"}
-                            },
-                            "required": ["symbol"]
-                        }
-                    ),
-                    Tool(
-                        name="get_top_cryptocurrencies",
-                        description="Get top cryptocurrencies by market cap",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "limit": {"type": "integer", "description": "Number of cryptos to return", "default": 10}
-                            }
-                        }
-                    ),
-                    Tool(
-                        name="get_crypto_history",
-                        description="Get historical cryptocurrency price data",
-                        inputSchema={
-                            "type": "object",
-                            "properties": {
-                                "symbol": {"type": "string", "description": "Crypto symbol"},
-                                "timeframe": {"type": "string", "description": "Timeframe (1d, 7d, 30d)", "default": "7d"}
-                            },
-                            "required": ["symbol"]
-                        }
-                    ),
-                    
                     # Stock/NASDAQ Tools
                     Tool(
                         name="get_stock_price",
@@ -248,141 +206,25 @@ class UnifiedMCPServer:
             )
 
         @self.server.call_tool()
-        async def handle_call_tool(request: CallToolRequest) -> CallToolResult:
+        async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
             """Handle tool calls."""
-            tool_name = request.params.name
-            args = request.params.arguments or {}
+            tool_name = name
+            args = arguments or {}
             
             try:
                 # Route to appropriate tool handler
-                if tool_name.startswith("get_crypto"):
-                    return await self._handle_crypto_tool(tool_name, args)
-                elif tool_name.startswith("get_stock") or tool_name == "get_market_movers":
-                    return await self._handle_stock_tool(tool_name, args)
+                if tool_name.startswith("get_stock") or tool_name == "get_market_movers":
+                    result = await self._handle_stock_tool(tool_name, args)
+                    return result.content
                 elif tool_name in ["search_knowledge", "add_knowledge", "analyze_portfolio", "get_risk_assessment"]:
-                    return await self._handle_portfolio_tool(tool_name, args)
+                    result = await self._handle_portfolio_tool(tool_name, args)
+                    return result.content
                 else:
-                    raise ValueError(f"Unknown tool: {tool_name}")
+                    return [TextContent(type="text", text=f"Unknown tool: {tool_name}")]
                     
             except Exception as e:
                 logger.error(f"Error in tool call {tool_name}: {e}")
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error: {str(e)}")]
-                )
-
-    # Cryptocurrency Tool Handlers
-    async def _handle_crypto_tool(self, tool_name: str, args: Dict[str, Any]) -> CallToolResult:
-        """Handle cryptocurrency-related tools."""
-        
-        if tool_name == "get_crypto_price":
-            symbol = args.get("symbol", "").upper()
-            vs_currency = args.get("vs_currency", "USD").upper()
-            
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies={vs_currency.lower()}&include_24hr_change=true"
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        if symbol.lower() in data:
-                            price_data = data[symbol.lower()]
-                            result = {
-                                "symbol": symbol,
-                                "price": price_data.get(vs_currency.lower()),
-                                "currency": vs_currency,
-                                "change_24h": price_data.get(f"{vs_currency.lower()}_24h_change"),
-                                "timestamp": datetime.now().isoformat()
-                            }
-                            return CallToolResult(
-                                content=[TextContent(type="text", text=json.dumps(result, indent=2))]
-                            )
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Could not fetch price for {symbol}")]
-                )
-                
-            except Exception as e:
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error fetching crypto price: {str(e)}")]
-                )
-
-        elif tool_name == "get_crypto_market_data":
-            symbol = args.get("symbol", "").lower()
-            
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(f"https://api.coingecko.com/api/v3/coins/{symbol}")
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        market_data = {
-                            "name": data.get("name"),
-                            "symbol": data.get("symbol", "").upper(),
-                            "current_price": data.get("market_data", {}).get("current_price", {}).get("usd"),
-                            "market_cap": data.get("market_data", {}).get("market_cap", {}).get("usd"),
-                            "total_volume": data.get("market_data", {}).get("total_volume", {}).get("usd"),
-                            "price_change_24h": data.get("market_data", {}).get("price_change_percentage_24h"),
-                            "price_change_7d": data.get("market_data", {}).get("price_change_percentage_7d"),
-                            "market_cap_rank": data.get("market_cap_rank"),
-                            "circulating_supply": data.get("market_data", {}).get("circulating_supply"),
-                            "total_supply": data.get("market_data", {}).get("total_supply"),
-                        }
-                        
-                        return CallToolResult(
-                            content=[TextContent(type="text", text=json.dumps(market_data, indent=2))]
-                        )
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Could not fetch market data for {symbol}")]
-                )
-                
-            except Exception as e:
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error fetching market data: {str(e)}")]
-                )
-
-        elif tool_name == "get_top_cryptocurrencies":
-            limit = args.get("limit", 10)
-            
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page={limit}&page=1"
-                    )
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        cryptos = []
-                        
-                        for coin in data:
-                            cryptos.append({
-                                "rank": coin.get("market_cap_rank"),
-                                "name": coin.get("name"),
-                                "symbol": coin.get("symbol", "").upper(),
-                                "price": coin.get("current_price"),
-                                "market_cap": coin.get("market_cap"),
-                                "price_change_24h": coin.get("price_change_percentage_24h"),
-                            })
-                        
-                        return CallToolResult(
-                            content=[TextContent(type="text", text=json.dumps(cryptos, indent=2))]
-                        )
-                
-                return CallToolResult(
-                    content=[TextContent(type="text", text="Could not fetch top cryptocurrencies")]
-                )
-                
-            except Exception as e:
-                return CallToolResult(
-                    content=[TextContent(type="text", text=f"Error fetching top cryptos: {str(e)}")]
-                )
-
-        # Add other crypto tools...
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"Crypto tool {tool_name} not implemented yet")]
-        )
+                return [TextContent(type="text", text=f"Error: {str(e)}")]
 
     # Stock Tool Handlers
     async def _handle_stock_tool(self, tool_name: str, args: Dict[str, Any]) -> CallToolResult:
