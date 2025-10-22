@@ -15,7 +15,7 @@ This system has been adapted to use Google's Gemini API as the primary LLM provi
    cd c:\Users\VahidPC\MCP_Agents
    ```
 
-2. **Run the setup script:**
+2. **Run the setup script (optional):**
    ```powershell
    .\setup_gemini.ps1
    ```
